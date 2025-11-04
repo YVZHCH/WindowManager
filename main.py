@@ -360,34 +360,64 @@ class Controller(QtCore.QObject):
     # Hotkey handling
     # -----------------------
     def register_hotkeys(self):
-        # unregister existing and start a new keyboard thread
+        """注册快捷键并启动守护线程"""
         try:
             keyboard.unhook_all()
         except Exception:
             pass
-        threading.Thread(target=self._keyboard_thread, daemon=True).start()
+
+        # 启动热键线程
+        self.hotkey_thread = threading.Thread(target=self._keyboard_thread, daemon=True)
+        self.hotkey_thread.start()
+
+        # 启动定时检查线程，防止挂钩失效
+        self._schedule_hotkey_check()
+
+    def _schedule_hotkey_check(self):
+        """周期性检测 keyboard 钩子是否仍在运行"""
+        def checker():
+            while True:
+                try:
+                    # 若热键列表异常少（说明被清空或挂钩失效）
+                    hooks = getattr(keyboard, "_hotkeys", None)
+                    if not hooks or len(hooks) < 3:
+                        print("[!] 检测到快捷键挂钩失效，正在重新注册...")
+                        self.register_hotkeys()
+                        return  # 退出当前检测循环
+                except Exception as e:
+                    print("热键检测异常:", e)
+                    self.register_hotkeys()
+                    return
+                time.sleep(60)  # 每 60 秒检测一次
+
+        threading.Thread(target=checker, daemon=True).start()
 
     def _keyboard_thread(self):
-        # Register digits 0-9 for group select
-        for d in '0123456789':
-            try:
-                keyboard.add_hotkey(f'ctrl+alt+{d}', lambda dd=d: self.on_group_digit(dd))
-            except Exception as e:
-                print("hotkey reg digit error", e)
-        # Register action keys
+        """注册所有热键（独立线程运行）"""
         try:
-            keyboard.add_hotkey(f'ctrl+alt+{self.model.hotkeys.get("topmost", "t")}',
+            # 注册数字键 0~9（Ctrl+Alt+数字）
+            for d in '0123456789':
+                keyboard.add_hotkey(f'ctrl+alt+{d}', lambda dd=d: self.on_group_digit(dd))
+
+            # 注册操作快捷键
+            hk = self.model.hotkeys
+            keyboard.add_hotkey(f'ctrl+alt+{hk.get("topmost", "t")}',
                                 lambda: self.on_action_trigger('topmost'))
-            keyboard.add_hotkey(f'ctrl+alt+{self.model.hotkeys.get("show_only", "m")}',
+            keyboard.add_hotkey(f'ctrl+alt+{hk.get("show_only", "m")}',
                                 lambda: self.on_action_trigger('show_only'))
-            keyboard.add_hotkey(f'ctrl+alt+{self.model.hotkeys.get("transparent", "p")}',
+            keyboard.add_hotkey(f'ctrl+alt+{hk.get("transparent", "p")}',
                                 lambda: self.on_action_trigger('transparent'))
-            keyboard.add_hotkey(f'ctrl+alt+{self.model.hotkeys.get("open_group_manager", "g")}',
+            keyboard.add_hotkey(f'ctrl+alt+{hk.get("open_group_manager", "g")}',
                                 lambda: self.emit_group_manager())
+
+            print("[+] 热键已注册完成")
         except Exception as e:
-            print("hotkey reg error", e)
-        # block the thread
-        keyboard.wait()
+            print("注册热键时出错:", e)
+
+        # 用非阻塞循环替代 keyboard.wait()
+        # 避免钩子挂起时阻塞线程
+        while True:
+            time.sleep(1)
 
     def emit_group_manager(self):
         hwnd = get_foreground_hwnd()
